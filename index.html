@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Atay2d Game</title>
+    <style>
+        canvas {
+            background-color: rgb(30, 30, 30);
+            padding: 0;
+            margin: auto;
+            display: block;
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 0;
+            right: 0;
+        }
+
+        #atay2d-canvas-parent {
+            background-color: rgb(20, 20, 20);
+        }
+    </style>
+</head>
+
+<body id="atay2d-canvas-parent">
+    <script type="module">
+        import init from "./pkg/atay2d.js";
+        init().then(() => {
+            console.log("WASM Loaded");
+        });
+    </script>
+</body>
+
+</html>
