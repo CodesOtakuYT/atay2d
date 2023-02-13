@@ -1,4 +1,4 @@
-#![allow(unused)]
+//#![allow(unused)]
 #![warn(unused_must_use)]
 
 #[cfg(target_arch = "wasm32")]
@@ -8,20 +8,153 @@ use winit::{
     dpi::PhysicalSize,
     event::{Event, WindowEvent},
     event_loop::EventLoop,
-    window::WindowBuilder,
+    window::{Window, WindowBuilder},
 };
 
+struct State {
+    surface: wgpu::Surface,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface_configuration: wgpu::SurfaceConfiguration,
+    size: winit::dpi::PhysicalSize<u32>,
+    window: Window,
+}
+
+impl State {
+    async fn new(window: Window) -> Self {
+        let size = window.inner_size();
+
+        let instance = wgpu::Instance::default();
+        let surface = unsafe { instance.create_surface(&window) }.unwrap();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                compatible_surface: Some(&surface),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: None,
+                    features: wgpu::Features::empty(),
+                    limits: if cfg!(target_arch = "wasm32") {
+                        wgpu::Limits::downlevel_webgl2_defaults()
+                    } else {
+                        wgpu::Limits::default()
+                    }
+                    .using_resolution(adapter.limits()),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let surface_capabilities = surface.get_capabilities(&adapter);
+        let surface_format = surface_capabilities
+            .formats
+            .iter()
+            .copied()
+            .find(|surface_format| surface_format.describe().srgb)
+            .unwrap_or(surface_capabilities.formats[0]);
+
+        let present_mode = wgpu::PresentMode::AutoNoVsync;
+        let alpha_mode = surface_capabilities.alpha_modes[0];
+
+        assert!(size.width != 0 && size.height != 0);
+
+        let surface_configuration = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width: size.width,
+            height: size.height,
+            present_mode,
+            alpha_mode,
+            view_formats: vec![],
+        };
+
+        surface.configure(&device, &surface_configuration);
+
+        State {
+            surface,
+            device,
+            queue,
+            surface_configuration,
+            size,
+            window,
+        }
+    }
+
+    pub fn window(&self) -> &Window {
+        &self.window
+    }
+
+    fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+        if new_size.width == 0 || new_size.height == 0 {
+            return;
+        }
+        self.size = new_size;
+        self.surface_configuration.width = new_size.width;
+        self.surface_configuration.height = new_size.height;
+        self.surface
+            .configure(&self.device, &self.surface_configuration);
+    }
+
+    fn input(&mut self, _event: &WindowEvent) -> bool {
+        false
+    }
+
+    fn update(&mut self) {}
+
+    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        let clear_color = wgpu::Color::GREEN;
+
+        let surface_texture = self.surface.get_current_texture()?;
+        let view = surface_texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
+
+        {
+            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear_color),
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+        }
+
+        self.queue.submit(Some(encoder.finish()));
+        surface_texture.present();
+
+        Ok(())
+    }
+}
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(start))]
-pub fn run() {
+pub async fn run() {
     let window_size = PhysicalSize::new(720, 480);
     let title = "Atay2d Game";
+    #[cfg(target_arch = "wasm32")]
     let canvas_parent_id = "atay2d-canvas-parent";
     let resizable = true;
 
     cfg_if::cfg_if! {
         if #[cfg(target_arch = "wasm32")] {
             std::panic::set_hook(Box::new(console_error_panic_hook::hook));
-            console_log::init_with_level(log::Level::Warn).expect("Couldn't initialize logger");
+            console_log::init().unwrap();
         } else {
             env_logger::init();
         }
@@ -34,7 +167,6 @@ pub fn run() {
         .with_resizable(resizable)
         .build(&event_loop)
         .unwrap();
-    let window_id = window.id();
 
     #[cfg(target_arch = "wasm32")]
     {
@@ -47,14 +179,49 @@ pub fn run() {
                 dst.append_child(&canvas).ok()?;
                 Some(())
             })
-            .expect("Couldn't append canvas to document body.");
+            .unwrap();
     }
 
+    let mut state = State::new(window).await;
+
+    #[cfg(windows)]
+    let mut erroneous_resize = true;
+    #[cfg(not(windows))]
+    let mut erroneous_resize = false;
+
     event_loop.run(move |event, _, control_flow| match event {
-        Event::WindowEvent { window_id, event } => match event {
-            WindowEvent::CloseRequested => control_flow.set_exit(),
-            _ => {}
-        },
+        Event::WindowEvent { window_id, event }
+            if window_id == state.window().id() && !state.input(&event) =>
+        {
+            match event {
+                WindowEvent::CloseRequested => control_flow.set_exit(),
+                WindowEvent::Resized(physical_size) => {
+                    if erroneous_resize {
+                        erroneous_resize = false;
+                        return;
+                    }
+                    state.resize(physical_size);
+                    state.window().request_redraw();
+                }
+                WindowEvent::ScaleFactorChanged { new_inner_size, .. } => {
+                    state.resize(new_inner_size.to_owned());
+                    state.window().request_redraw();
+                }
+                _ => {}
+            }
+        }
+        Event::RedrawRequested(window_id) if window_id == state.window().id() => {
+            state.update();
+            match state.render() {
+                Ok(_) => {}
+                Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
+                Err(wgpu::SurfaceError::OutOfMemory) => panic!("surface out of memory"),
+                Err(error) => eprintln!("ERROR: {:?}", error),
+            }
+        }
+        Event::MainEventsCleared => {
+            state.window().request_redraw();
+        }
         _ => {}
     })
 }
