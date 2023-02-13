@@ -50,6 +50,8 @@ const VERTICES: &[Vertex] = &[
     },
 ];
 
+const INDICES: &[u16] = &[0, 1, 2];
+
 struct State {
     surface: wgpu::Surface,
     device: wgpu::Device,
@@ -59,6 +61,7 @@ struct State {
     window: Window,
     render_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
 }
 
 impl State {
@@ -168,6 +171,12 @@ impl State {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Index Buffer"),
+            contents: bytemuck::cast_slice(INDICES),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
         State {
             surface,
             device,
@@ -177,6 +186,7 @@ impl State {
             window,
             render_pipeline,
             vertex_buffer,
+            index_buffer,
         }
     }
 
@@ -236,7 +246,8 @@ impl State {
 
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.draw(0..VERTICES.len() as u32, 0..1);
+            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
         }
 
         self.queue.submit(Some(encoder.finish()));
