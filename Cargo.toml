@@ -11,6 +11,7 @@ name = "atay2d_bin"
 path = "src/main.rs"
 
 [dependencies]
+bytemuck = { version = "1.13.0", features = ["derive"] }
 cfg-if = "1.0.0"
 env_logger = "0.10.0"
 log = "0.4.17"

@@ -1,15 +1,54 @@
-//#![allow(unused)]
+#![allow(unused)]
 #![warn(unused_must_use)]
 
+use bytemuck::{Pod, Zeroable};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
+use wgpu::util::DeviceExt;
 use winit::{
     dpi::PhysicalSize,
     event::{Event, WindowEvent},
     event_loop::EventLoop,
     window::{Window, WindowBuilder},
 };
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Zeroable, Pod)]
+struct Vertex {
+    position: [f32; 2],
+    color: [f32; 3],
+}
+
+impl Vertex {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
+        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x3];
+
+    fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
+        use std::mem;
+
+        wgpu::VertexBufferLayout {
+            array_stride: mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRIBUTES,
+        }
+    }
+}
+
+const VERTICES: &[Vertex] = &[
+    Vertex {
+        position: [0.0, 0.5],
+        color: [1.0, 0.0, 0.0],
+    },
+    Vertex {
+        position: [-0.5, -0.5],
+        color: [0.0, 1.0, 0.0],
+    },
+    Vertex {
+        position: [0.5, -0.5],
+        color: [0.0, 0.0, 1.0],
+    },
+];
 
 struct State {
     surface: wgpu::Surface,
@@ -19,6 +58,7 @@ struct State {
     size: winit::dpi::PhysicalSize<u32>,
     window: Window,
     render_pipeline: wgpu::RenderPipeline,
+    vertex_buffer: wgpu::Buffer,
 }
 
 impl State {
@@ -93,7 +133,7 @@ impl State {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "vertex",
-                buffers: &[],
+                buffers: &[Vertex::desc()],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -122,6 +162,12 @@ impl State {
             multiview: None,
         });
 
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: bytemuck::cast_slice(VERTICES),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
         State {
             surface,
             device,
@@ -130,6 +176,7 @@ impl State {
             size,
             window,
             render_pipeline,
+            vertex_buffer,
         }
     }
 
@@ -188,7 +235,8 @@ impl State {
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.draw(0..3, 0..1);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.draw(0..VERTICES.len() as u32, 0..1);
         }
 
         self.queue.submit(Some(encoder.finish()));
