@@ -6,7 +6,7 @@ use image::GenericImageView;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-use wgpu::util::DeviceExt;
+use wgpu::{util::DeviceExt, InstanceDescriptor};
 use winit::{
     dpi::PhysicalSize,
     event::{Event, WindowEvent},
@@ -57,6 +57,71 @@ const VERTICES: &[Vertex] = &[
 
 const INDICES: &[u16] = &[0, 1, 3, 3, 1, 2];
 
+fn create_multisampled_framebuffer(
+    device: &wgpu::Device,
+    config: &wgpu::SurfaceConfiguration,
+    sample_count: u32,
+) -> wgpu::TextureView {
+    let multisampled_texture_extent = wgpu::Extent3d {
+        width: config.width,
+        height: config.height,
+        depth_or_array_layers: 1,
+    };
+
+    let multisampled_frame_descriptor = &wgpu::TextureDescriptor {
+        size: multisampled_texture_extent,
+        mip_level_count: 1,
+        sample_count,
+        dimension: wgpu::TextureDimension::D2,
+        format: config.format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        label: None,
+        view_formats: &[],
+    };
+
+    device
+        .create_texture(multisampled_frame_descriptor)
+        .create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+fn get_closest_supported_sample_count(
+    adapter: &wgpu::Adapter,
+    surface_configuration: &wgpu::SurfaceConfiguration,
+    preferred_sample_count: u32,
+) -> u32 {
+    let mut sample_count = preferred_sample_count;
+    let sample_flags = adapter
+        .get_texture_format_features(surface_configuration.format)
+        .flags;
+
+    if !sample_flags.sample_count_supported(sample_count) {
+        let mut sample_counts = Vec::new();
+
+        if sample_flags.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X2) {
+            sample_counts.push(2);
+        }
+
+        if sample_flags.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4) {
+            sample_counts.push(4);
+        }
+
+        if sample_flags.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X8) {
+            sample_counts.push(8);
+        }
+
+        let mut x = u32::MAX;
+
+        for n in sample_counts {
+            let y = preferred_sample_count.abs_diff(n);
+            if y < x {
+                x = y;
+                sample_count = n;
+            }
+        }
+    }
+    sample_count
+}
+
 struct State {
     surface: wgpu::Surface,
     device: wgpu::Device,
@@ -68,13 +133,22 @@ struct State {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     diffuse_bind_group: wgpu::BindGroup,
+    multisampled_framebuffer: Option<wgpu::TextureView>,
+    sample_count: u32,
 }
 
 impl State {
     async fn new(window: Window) -> Self {
         let size = window.inner_size();
+        let preferred_sample_count = u32::MAX;
 
-        let instance = wgpu::Instance::default();
+        let instance = wgpu::Instance::new(InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            dx12_shader_compiler: wgpu::Dx12Compiler::Dxc {
+                dxil_path: None,
+                dxc_path: None,
+            },
+        });
         let surface = unsafe { instance.create_surface(&window) }.unwrap();
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -88,7 +162,11 @@ impl State {
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: None,
-                    features: wgpu::Features::empty(),
+                    features: if cfg!(target_arch = "wasm32") {
+                        wgpu::Features::empty()
+                    } else {
+                        wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+                    },
                     limits: if cfg!(target_arch = "wasm32") {
                         wgpu::Limits::downlevel_webgl2_defaults()
                     } else {
@@ -109,7 +187,7 @@ impl State {
             .find(|surface_format| surface_format.describe().srgb)
             .unwrap_or(surface_capabilities.formats[0]);
 
-        let present_mode = wgpu::PresentMode::AutoNoVsync;
+        let present_mode = wgpu::PresentMode::AutoVsync;
         let alpha_mode = surface_capabilities.alpha_modes[0];
 
         assert!(size.width != 0 && size.height != 0);
@@ -125,6 +203,14 @@ impl State {
         };
 
         surface.configure(&device, &surface_configuration);
+
+        let sample_count = get_closest_supported_sample_count(
+            &adapter,
+            &surface_configuration,
+            preferred_sample_count,
+        );
+
+        log::warn!("Sample count: {}", sample_count);
 
         let diffuse_bytes = include_bytes!("../resources/images/moroccan_flag.png");
         let diffuse_image = image::load_from_memory(diffuse_bytes).unwrap();
@@ -221,6 +307,16 @@ impl State {
                 push_constant_ranges: &[],
             });
 
+        let multisampled_framebuffer = if sample_count != 1 {
+            Some(create_multisampled_framebuffer(
+                &device,
+                &surface_configuration,
+                sample_count,
+            ))
+        } else {
+            None
+        };
+
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
             layout: Some(&render_pipeline_layout),
@@ -249,7 +345,7 @@ impl State {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState {
-                count: 1,
+                count: sample_count,
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
@@ -279,6 +375,8 @@ impl State {
             vertex_buffer,
             index_buffer,
             diffuse_bind_group,
+            multisampled_framebuffer,
+            sample_count,
         }
     }
 
@@ -295,6 +393,13 @@ impl State {
         self.surface_configuration.height = new_size.height;
         self.surface
             .configure(&self.device, &self.surface_configuration);
+        if self.multisampled_framebuffer.is_some() {
+            self.multisampled_framebuffer = Some(create_multisampled_framebuffer(
+                &self.device,
+                &self.surface_configuration,
+                self.sample_count,
+            ));
+        }
     }
 
     fn input(&mut self, _event: &WindowEvent) -> bool {
@@ -323,16 +428,29 @@ impl State {
             });
 
         {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            let render_pass_color_attachment = if self.sample_count == 1 {
+                wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(clear_color),
                         store: true,
                     },
-                })],
+                }
+            } else {
+                wgpu::RenderPassColorAttachment {
+                    view: self.multisampled_framebuffer.as_ref().unwrap(),
+                    resolve_target: Some(&view),
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear_color),
+                        store: false,
+                    },
+                }
+            };
+
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Render Pass"),
+                color_attachments: &[Some(render_pass_color_attachment)],
                 depth_stencil_attachment: None,
             });
 
@@ -363,6 +481,7 @@ pub async fn run() {
             std::panic::set_hook(Box::new(console_error_panic_hook::hook));
             console_log::init().unwrap();
         } else {
+            std::env::set_var("RUST_LOG", "INFO");
             env_logger::init();
         }
     }
